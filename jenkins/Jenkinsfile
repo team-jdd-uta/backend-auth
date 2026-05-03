@@ -52,8 +52,13 @@ spec:
   environment {
     AWS_ACCOUNT_ID = '881490135253'
     AWS_REGION = 'ap-northeast-2'
-    IMAGE_REF = ''
-    IMAGE_NAME = 'team9-auth-service'
+    JENKINS_AGENT_SERVICE_ACCOUNT = 'jenkins-kaniko-agent'
+    IMAGE_PREFIX = 'team9-'
+    IMAGE_NAME = 'auth-service'
+    DOCKER_CONTEXT = '.'
+    DOCKERFILE = 'Dockerfile'
+    PLATFORM = 'linux/amd64'
+    TEST_COMMAND = 'gradle --no-daemon test'
     GIT_CREDENTIALS_ID = 'github-scm'
     GITOPS_REPO_URL = 'https://github.com/team-jdd-uta/gitops.git'
     GITOPS_BRANCH = 'main'
@@ -75,12 +80,15 @@ spec:
             ? params.IMAGE_TAG.trim()
             : sh(returnStdout: true, script: 'git rev-parse --short=12 HEAD').trim()
           env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-          env.IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
-          env.LATEST_IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:latest"
+          env.IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_PREFIX}${env.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
+          env.LATEST_IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_PREFIX}${env.IMAGE_NAME}:latest"
           env.IS_MAIN_BUILD = ((env.BRANCH_NAME == 'main') || (env.GIT_BRANCH == 'origin/main')).toString()
+          echo "Image: ${env.IMAGE_REF}"
+          echo "Latest image: ${env.LATEST_IMAGE_REF}"
           env.RUN_TESTS_EFFECTIVE = params.RUN_TESTS.toString()
           env.PUSH_IMAGE_EFFECTIVE = params.PUSH_IMAGE.toString()
           env.DEPLOY_EFFECTIVE = params.DEPLOY.toString()
+          echo "Main build: ${env.IS_MAIN_BUILD}"
         }
       }
     }
@@ -112,8 +120,8 @@ spec:
           env.PUSH_IMAGE_EFFECTIVE = approval.PUSH_IMAGE.toString()
           env.DEPLOY_EFFECTIVE = approval.DEPLOY.toString()
           env.RESOLVED_IMAGE_TAG = approval.IMAGE_TAG?.trim() ? approval.IMAGE_TAG.trim() : env.RESOLVED_IMAGE_TAG
-          env.IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
-          env.LATEST_IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:latest"
+          env.IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_PREFIX}${env.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
+          env.LATEST_IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_PREFIX}${env.IMAGE_NAME}:latest"
 
           notifySlack("*${env.APPROVED_BY}* 님이 파이프라인 실행을 승인했습니다.\n테스트 실행: ${env.RUN_TESTS_EFFECTIVE}, 이미지 push: ${env.PUSH_IMAGE_EFFECTIVE}, 배포: ${env.DEPLOY_EFFECTIVE}, 이미지 태그: ${env.RESOLVED_IMAGE_TAG}\n빌드 링크: ${env.BUILD_URL}")
         }
@@ -123,7 +131,7 @@ spec:
       when { expression { return env.RUN_TESTS_EFFECTIVE == 'true' } }
       steps {
         container('gradle') {
-          sh './gradlew test'
+          sh "${env.TEST_COMMAND}"
         }
       }
     }
@@ -133,9 +141,9 @@ spec:
         container('kaniko') {
           sh '''
             /kaniko/executor \
-              --context "$WORKSPACE" \
-              --dockerfile "$WORKSPACE/Dockerfile" \
-              --custom-platform linux/amd64 \
+              --context "$WORKSPACE/$DOCKER_CONTEXT" \
+              --dockerfile "$WORKSPACE/$DOCKERFILE" \
+              --custom-platform "$PLATFORM" \
               --no-push \
               --no-push-cache
           '''
@@ -153,9 +161,9 @@ spec:
         container('kaniko') {
           sh '''
             /kaniko/executor \
-              --context "$WORKSPACE" \
-              --dockerfile "$WORKSPACE/Dockerfile" \
-              --custom-platform linux/amd64 \
+              --context "$WORKSPACE/$DOCKER_CONTEXT" \
+              --dockerfile "$WORKSPACE/$DOCKERFILE" \
+              --custom-platform "$PLATFORM" \
               --destination "$IMAGE_REF" \
               --destination "$LATEST_IMAGE_REF" \
               --cache=false
