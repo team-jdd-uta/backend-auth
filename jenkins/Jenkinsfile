@@ -115,11 +115,12 @@ spec:
             )
           }
 
-          env.APPROVED_BY = approval.APPROVED_BY ?: 'unknown'
-          env.RUN_TESTS_EFFECTIVE = approval.RUN_TESTS.toString()
-          env.PUSH_IMAGE_EFFECTIVE = approval.PUSH_IMAGE.toString()
-          env.DEPLOY_EFFECTIVE = approval.DEPLOY.toString()
-          env.RESOLVED_IMAGE_TAG = approval.IMAGE_TAG?.trim() ? approval.IMAGE_TAG.trim() : env.RESOLVED_IMAGE_TAG
+          def approvalParams = approval instanceof Map ? approval : [:]
+          env.APPROVED_BY = approvalParams.APPROVED_BY ?: 'unknown'
+          env.RUN_TESTS_EFFECTIVE = approvalParams.containsKey('RUN_TESTS') ? approvalParams.RUN_TESTS.toString() : env.RUN_TESTS_EFFECTIVE
+          env.PUSH_IMAGE_EFFECTIVE = approvalParams.containsKey('PUSH_IMAGE') ? approvalParams.PUSH_IMAGE.toString() : env.PUSH_IMAGE_EFFECTIVE
+          env.DEPLOY_EFFECTIVE = approvalParams.containsKey('DEPLOY') ? approvalParams.DEPLOY.toString() : env.DEPLOY_EFFECTIVE
+          env.RESOLVED_IMAGE_TAG = approvalParams.IMAGE_TAG?.trim() ? approvalParams.IMAGE_TAG.trim() : env.RESOLVED_IMAGE_TAG
           env.IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_PREFIX}${env.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
           env.LATEST_IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_PREFIX}${env.IMAGE_NAME}:latest"
 
