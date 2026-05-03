@@ -67,6 +67,18 @@ class AuthControllerSecurityTest {
     }
 
     @Test
+    void authorizePrefixPathIsPublicToEnvoyAndUsesOriginalPathFromUri() throws Exception {
+        when(authDecisionService.authorize(eq("GET"), eq("/api/user/me"), any()))
+                .thenReturn(AuthDecision.allow(Map.of("X-User-Id", "1")));
+
+        mockMvc.perform(get("/authorize/api/user/me")
+                        .header("authorization", "Bearer abc"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-User-Id", "1"))
+                .andExpect(content().string("allowed"));
+    }
+
+    @Test
     void unknownEndpointIsDenied() throws Exception {
         mockMvc.perform(get("/internal"))
                 .andExpect(status().isForbidden());
