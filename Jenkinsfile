@@ -1,3 +1,5 @@
+import groovy.json.JsonOutput
+
 pipeline {
   agent {
     kubernetes {
@@ -18,6 +20,17 @@ spec:
       image: gradle:8.14.4-jdk21-alpine
       command: ["cat"]
       tty: true
+    - name: git
+      image: alpine/git:2.47.2
+      command: ["cat"]
+      tty: true
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["cat"]
+      tty: true
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
 """
     }
   }
@@ -32,6 +45,8 @@ spec:
     string(name: 'IMAGE_TAG', defaultValue: '', description: '비워두면 git short sha를 이미지 태그로 사용합니다.')
     booleanParam(name: 'RUN_TESTS', defaultValue: true, description: '이미지 push 전에 테스트를 실행합니다.')
     booleanParam(name: 'PUSH_IMAGE', defaultValue: true, description: 'main 브랜치에서 ECR 이미지 push 여부')
+    booleanParam(name: 'DEPLOY', defaultValue: false, description: 'main 브랜치에서만 배포 연동을 실행합니다.')
+    string(name: 'APPROVAL_TIMEOUT_MINUTES', defaultValue: '30', description: 'main 브랜치 webhook 빌드가 승인 입력을 기다릴 시간(분)')
   }
 
   environment {
@@ -39,6 +54,12 @@ spec:
     AWS_REGION = 'ap-northeast-2'
     IMAGE_REF = ''
     IMAGE_NAME = 'team9-auth-service'
+    GIT_CREDENTIALS_ID = 'github-scm'
+    GITOPS_REPO_URL = 'https://github.com/team-jdd-uta/gitops.git'
+    GITOPS_BRANCH = 'main'
+    GITOPS_APP_FILE = 'bootstrap/root/applications/backend-auth-service.yaml'
+    SLACK_WEBHOOK_CREDENTIALS_ID = 'jenkins-slack-webhook'
+    ARGOCD_APP_NAME = 'backend-auth-service-dev'
   }
 
   stages {
@@ -55,11 +76,51 @@ spec:
             : sh(returnStdout: true, script: 'git rev-parse --short=12 HEAD').trim()
           env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
           env.IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
+          env.LATEST_IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:latest"
+          env.IS_MAIN_BUILD = ((env.BRANCH_NAME == 'main') || (env.GIT_BRANCH == 'origin/main')).toString()
+          env.RUN_TESTS_EFFECTIVE = params.RUN_TESTS.toString()
+          env.PUSH_IMAGE_EFFECTIVE = params.PUSH_IMAGE.toString()
+          env.DEPLOY_EFFECTIVE = params.DEPLOY.toString()
+        }
+      }
+    }
+    stage('Approval') {
+      when {
+        expression { return env.IS_MAIN_BUILD == 'true' }
+      }
+      steps {
+        script {
+          notifySlack("*${env.JOB_NAME}* #${env.BUILD_NUMBER}에서 코드 변경이 감지되었습니다.\n브랜치: ${env.BRANCH_NAME ?: env.GIT_BRANCH}\n커밋: ${env.GIT_COMMIT}\n이미지 태그: ${env.RESOLVED_IMAGE_TAG}\n실행 여부와 옵션 선택: ${env.BUILD_URL}input")
+
+          def approval = timeout(time: params.APPROVAL_TIMEOUT_MINUTES as Integer, unit: 'MINUTES') {
+            input(
+              id: 'PipelineApproval',
+              message: "${env.JOB_NAME} #${env.BUILD_NUMBER}을 실행할까요?",
+              ok: '파이프라인 실행',
+              submitterParameter: 'APPROVED_BY',
+              parameters: [
+                string(name: 'IMAGE_TAG', defaultValue: env.RESOLVED_IMAGE_TAG, description: '빌드/배포에 사용할 이미지 태그'),
+                booleanParam(name: 'RUN_TESTS', defaultValue: params.RUN_TESTS, description: '이미지 push 전에 테스트를 실행합니다.'),
+                booleanParam(name: 'PUSH_IMAGE', defaultValue: params.PUSH_IMAGE, description: '이미지를 ECR에 push합니다.'),
+                booleanParam(name: 'DEPLOY', defaultValue: params.DEPLOY, description: 'Argo CD 배포를 위해 GitOps manifest를 갱신합니다.')
+              ]
+            )
+          }
+
+          env.APPROVED_BY = approval.APPROVED_BY ?: 'unknown'
+          env.RUN_TESTS_EFFECTIVE = approval.RUN_TESTS.toString()
+          env.PUSH_IMAGE_EFFECTIVE = approval.PUSH_IMAGE.toString()
+          env.DEPLOY_EFFECTIVE = approval.DEPLOY.toString()
+          env.RESOLVED_IMAGE_TAG = approval.IMAGE_TAG?.trim() ? approval.IMAGE_TAG.trim() : env.RESOLVED_IMAGE_TAG
+          env.IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
+          env.LATEST_IMAGE_REF = "${env.ECR_REGISTRY}/${env.IMAGE_NAME}:latest"
+
+          notifySlack("*${env.APPROVED_BY}* 님이 파이프라인 실행을 승인했습니다.\n테스트 실행: ${env.RUN_TESTS_EFFECTIVE}, 이미지 push: ${env.PUSH_IMAGE_EFFECTIVE}, 배포: ${env.DEPLOY_EFFECTIVE}, 이미지 태그: ${env.RESOLVED_IMAGE_TAG}\n빌드 링크: ${env.BUILD_URL}")
         }
       }
     }
     stage('Test') {
-      when { expression { return params.RUN_TESTS } }
+      when { expression { return env.RUN_TESTS_EFFECTIVE == 'true' } }
       steps {
         container('gradle') {
           sh './gradlew test'
@@ -84,8 +145,8 @@ spec:
     stage('Main Image Push') {
       when {
         allOf {
-          branch 'main'
-          expression { return params.PUSH_IMAGE }
+          expression { return env.IS_MAIN_BUILD == 'true' }
+          expression { return env.PUSH_IMAGE_EFFECTIVE == 'true' }
         }
       }
       steps {
@@ -96,11 +157,78 @@ spec:
               --dockerfile "$WORKSPACE/Dockerfile" \
               --custom-platform linux/amd64 \
               --destination "$IMAGE_REF" \
-              --destination "$ECR_REGISTRY/$IMAGE_NAME:latest" \
+              --destination "$LATEST_IMAGE_REF" \
               --cache=false
           '''
         }
       }
+    }
+    stage('Deploy') {
+      when {
+        allOf {
+          expression { return env.IS_MAIN_BUILD == 'true' }
+          expression { return env.DEPLOY_EFFECTIVE == 'true' }
+        }
+      }
+      steps {
+        container('git') {
+          withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS_ID, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_TOKEN')]) {
+            sh '''
+              set -eu
+              rm -rf gitops
+              git clone --branch "$GITOPS_BRANCH" "https://${GIT_USERNAME}:${GIT_TOKEN}@${GITOPS_REPO_URL#https://}" gitops
+              cd gitops
+              git config user.email "jenkins@team9.cloud.skala-ai.com"
+              git config user.name "team9 Jenkins"
+
+              tmp_file="$(mktemp)"
+              awk -v tag="$RESOLVED_IMAGE_TAG" '
+                !updated && /^[[:space:]]+tag:/ {
+                  sub(/tag:.*/, "tag: " tag)
+                  updated = 1
+                }
+                { print }
+              ' "$GITOPS_APP_FILE" > "$tmp_file"
+              mv "$tmp_file" "$GITOPS_APP_FILE"
+
+              if git diff --quiet -- "$GITOPS_APP_FILE"; then
+                echo "GitOps manifest already points at $RESOLVED_IMAGE_TAG"
+              else
+                git add "$GITOPS_APP_FILE"
+                git commit -m "deploy: ${ARGOCD_APP_NAME} ${RESOLVED_IMAGE_TAG}"
+                git pull --rebase origin "$GITOPS_BRANCH"
+                git push origin "HEAD:$GITOPS_BRANCH"
+              fi
+            '''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      notifySlack("*${env.JOB_NAME}* #${env.BUILD_NUMBER}이 성공했습니다.\n이미지 태그: ${env.RESOLVED_IMAGE_TAG ?: 'n/a'}\n빌드 링크: ${env.BUILD_URL}")
+    }
+    failure {
+      notifySlack("*${env.JOB_NAME}* #${env.BUILD_NUMBER}이 실패했습니다.\n빌드 링크: ${env.BUILD_URL}")
+    }
+    aborted {
+      notifySlack("*${env.JOB_NAME}* #${env.BUILD_NUMBER}이 승인 전 취소되었거나 대기 시간이 초과되었습니다.\n빌드 링크: ${env.BUILD_URL}")
+    }
+  }
+}
+
+void notifySlack(String message) {
+  if (!env.SLACK_WEBHOOK_CREDENTIALS_ID?.trim()) {
+    echo 'Slack webhook credential id is empty; skipping Slack notification.'
+    return
+  }
+
+  writeFile file: '.slack-payload.json', text: JsonOutput.toJson([text: message])
+  container('curl') {
+    withCredentials([string(credentialsId: env.SLACK_WEBHOOK_CREDENTIALS_ID, variable: 'SLACK_WEBHOOK_URL')]) {
+      sh(label: 'Notify Slack', script: 'curl --max-time 10 --retry 1 -fsS -X POST -H "Content-Type: application/json" --data @.slack-payload.json "$SLACK_WEBHOOK_URL" >/dev/null || echo "Slack 알림 전송에 실패했지만 파이프라인은 계속 진행합니다."')
     }
   }
 }
