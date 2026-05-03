@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 
 @RestController
@@ -18,10 +19,17 @@ public class AuthController {
         this.authDecisionService = authDecisionService;
     }
 
-    @RequestMapping("/authorize")
-    public ResponseEntity<String> authorize(@RequestHeader Map<String, String> headers) {
+    @RequestMapping({"/authorize", "/authorize/**"})
+    public ResponseEntity<String> authorize(@RequestHeader Map<String, String> headers,
+                                            HttpServletRequest request) {
         String method = firstHeader(headers, "x-envoy-original-method", "x-original-method", ":method");
         String path = firstHeader(headers, "x-envoy-original-path", "x-original-uri", ":path");
+        if (method.isBlank()) {
+            method = request.getMethod();
+        }
+        if (path.isBlank()) {
+            path = originalPathFromAuthorizeRequest(request.getRequestURI());
+        }
         AuthDecision decision = authDecisionService.authorize(method, path, headers);
         ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.valueOf(decision.status()));
         decision.responseHeaders().forEach(response::header);
@@ -42,5 +50,17 @@ public class AuthController {
             }
         }
         return "";
+    }
+
+    private String originalPathFromAuthorizeRequest(String requestUri) {
+        if (requestUri == null || requestUri.isBlank()) {
+            return "";
+        }
+        String prefix = "/authorize";
+        if (!requestUri.startsWith(prefix)) {
+            return requestUri;
+        }
+        String originalPath = requestUri.substring(prefix.length());
+        return originalPath.isBlank() ? "" : originalPath;
     }
 }
